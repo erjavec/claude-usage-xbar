@@ -1,12 +1,13 @@
 #!/bin/bash
-# install.sh — install cswitch and the Claude Usage xbar plugin from this checkout.
+# install.sh — install cswitch, cping and the Claude Usage xbar plugin from this checkout.
 #
-#   ./install.sh               symlink both into place (a later `git pull` updates them)
+#   ./install.sh               symlink them into place (a later `git pull` updates them)
 #   ./install.sh --copy        copy instead of symlinking (the checkout can be deleted afterwards)
-#   ./install.sh --uninstall   remove them again (saved logins in the Keychain are kept)
+#   ./install.sh --uninstall   remove them again, and cping's schedule (saved logins are kept)
 #
-# cswitch goes to ~/.local/bin, the plugin to xbar's plugin folder. Existing files that differ
-# are moved to ~/.cache/claude-usage-xbar/backup first (not next to the plugin: xbar would run them).
+# cswitch and cping go to ~/.local/bin, the plugin to xbar's plugin folder. Existing files that
+# differ are moved to ~/.cache/claude-usage-xbar/backup first (not next to the plugin: xbar would
+# run them).
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")" && pwd)
@@ -52,7 +53,9 @@ case "${1:-}" in
   --copy) MODE=copy ;;
   --uninstall)
     echo "Uninstalling"
+    [ -f "$HOME/Library/LaunchAgents/com.github.erjavec.cping.plist" ] && "$REPO/cping" schedule off | sed 's/^/  ✓ cping: /'
     unplace "$REPO/cswitch" "$BIN_DIR/cswitch"
+    unplace "$REPO/cping" "$BIN_DIR/cping"
     unplace "$REPO/$PLUGIN" "$PLUGIN_DIR/$PLUGIN"
     reload_xbar
     cat <<EOF
@@ -61,10 +64,10 @@ Saved logins were kept. To remove them as well:
   for l in \$(ls ~/.claude-accounts | sed -n 's/\.oauth\.json\$//p'); do
     security delete-generic-password -s "Claude Code-credentials (cswitch)" -a "\$l"
   done
-  rm -rf ~/.claude-accounts ~/.cache/claude-usage
+  rm -rf ~/.claude-accounts ~/.cache/claude-usage ~/Library/Logs/cping.log
 EOF
     exit 0 ;;
-  -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) die "unknown option '$1' (see --help)" ;;
 esac
 
@@ -86,8 +89,9 @@ command -v claude >/dev/null || warn "claude (Claude Code) not found on PATH"
 
 echo "Installing ($MODE)"
 mkdir -p "$BIN_DIR" "$PLUGIN_DIR"
-chmod +x "$REPO/cswitch" "$REPO/$PLUGIN"
+chmod +x "$REPO/cswitch" "$REPO/cping" "$REPO/$PLUGIN"
 place "$REPO/cswitch" "$BIN_DIR/cswitch" "$MODE"
+place "$REPO/cping" "$BIN_DIR/cping" "$MODE"
 place "$REPO/$PLUGIN" "$PLUGIN_DIR/$PLUGIN" "$MODE"
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) warn "$BIN_DIR is not on your PATH — add it to your shell profile" ;; esac
 reload_xbar
@@ -99,4 +103,7 @@ Done. Next, save each claude.ai account you use with Claude Code:
   2. /login to the next account, then:                               cswitch save personal
   3. Switch any time with:  cswitch work   (or from the xbar menu)
 Labels are free-form: lowercase letters, digits, - and _.
+
+Optional: line the 5-hour windows up with your day by opening one at fixed hours:
+  cping schedule 4 9 14 19
 EOF

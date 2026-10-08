@@ -1,0 +1,140 @@
+#!/bin/bash
+# cping — open Claude Code's 5-hour window at fixed hours, so the windows line up with your day.
+# https://github.com/erjavec/claude-usage-xbar
+#
+#   cping                      open a window now (one tiny Haiku request through Claude Code)
+#   cping schedule <hour>...   ping every day at these hours, e.g. cping schedule 4 9 14 19
+#   cping schedule off         remove the schedule
+#   cping schedule             show the schedule and the last pings
+#
+# A 5-hour window opens with the first request after the previous one ran out. Pinging at 4, 9,
+# 14 and 19 keeps the windows on 4–9, 9–14, 14–19 and 19–24: the one opened at 4 runs out at 9,
+# so a morning that starts at 8 gets the rest of it plus a fresh one. Only the current login is
+# pinged, through Claude Code itself, which refreshes its token as usual.
+# The schedule is a launchd agent. launchd runs a ping it missed while the Mac slept on wake;
+# cping skips such a late ping, since it would shift the windows instead of lining them up.
+set -euo pipefail
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:$PATH"
+
+AGENT="com.github.erjavec.cping"
+PLIST="$HOME/Library/LaunchAgents/$AGENT.plist"
+LOG="$HOME/Library/Logs/cping.log"
+MINUTE=1      # ping a minute past the hour, clear of the window that runs out on the hour
+LATE=15       # a scheduled run this many minutes past the hour or later is skipped
+TIMEOUT=180   # seconds before a hanging claude call is killed
+
+# run by launchd there is no terminal: surface failures as notifications too
+notify(){ [ -t 2 ] || osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "cping"' \
+  -e 'end run' "$1" >/dev/null 2>&1 || true; }
+die(){ echo "cping: $*" >&2; notify "$*"; exit 1; }
+# under launchd stdout already is the log; from a terminal, append there too
+log(){ local line; line="$(date '+%Y-%m-%d %H:%M') $*"; echo "$line"
+  if [ -t 1 ]; then echo "$line" >> "$LOG"; fi; }
+slots(){ local h out=""; for h in ${1//,/ }; do out+="$(printf '%02d:%02d' "$h" "$MINUTE"), "; done; printf '%s' "${out%, }"; }
+
+OUT=""; trap '[ -z "$OUT" ] || rm -f "$OUT"' EXIT
+ping(){ local claude acct pid wd rc=0 msg
+  claude=$(command -v "${CPING_CLAUDE:-claude}") || die "Claude Code (claude) not found on PATH"  # override is for testing
+  acct=$(cswitch current 2>/dev/null || true)
+  OUT=$(mktemp -t cping)
+  # --safe-mode: no hooks, MCP servers or CLAUDE.md; --tools "": no tool definitions in the request
+  (cd "${TMPDIR:-/tmp}" && exec "$claude" -p --safe-mode --no-session-persistence --tools "" \
+    --model haiku --system-prompt "Reply with the single word: ok" "ok") </dev/null >"$OUT" 2>&1 &
+  pid=$!
+  caffeinate -i -w "$pid" &                       # keep the Mac awake until it's done
+  ( sleep "$TIMEOUT" && kill "$pid" ) 2>/dev/null & wd=$!
+  wait "$pid" 2>/dev/null || rc=$?                # 2>/dev/null: no "Terminated" job notice
+  pkill -P "$wd" sleep 2>/dev/null || true        # ends the watchdog without a stray sleep
+  if [ "$rc" = 0 ]; then log "ping ok${acct:+ ($acct)}"; return; fi
+  msg=$(tail -n 3 "$OUT" | tr '\n' ' ' | cut -c1-200)
+  [ "$rc" -ge 128 ] && msg="no answer within ${TIMEOUT}s"
+  log "ping failed${acct:+ ($acct)}, exit $rc: $msg"; notify "ping failed: $msg"; exit 1; }
+
+# launchd's run: is it on time for one of the scheduled hours?
+on_time(){ local h m; h=$((10#$(date +%H))); m=$((10#$(date +%M)))
+  [ "$m" -lt "$LATE" ] || return 1
+  case ",$1," in *",$h,"*) return 0 ;; esac; return 1; }
+
+show(){ local at
+  if [ -f "$PLIST" ]; then
+    at=$(plutil -extract ProgramArguments.2 raw -o - "$PLIST" 2>/dev/null || echo "")
+    printf 'pinging every day at %s' "$(slots "$at")"
+    if launchctl print "gui/$(id -u)/$AGENT" >/dev/null 2>&1; then echo; else echo " (not loaded: rerun cping schedule ${at//,/ })"; fi
+  else
+    echo "no schedule; set one with: cping schedule 4 9 14 19"
+  fi
+  if [ -s "$LOG" ]; then echo "last pings ($LOG):"; tail -n 5 "$LOG" | sed 's/^/  /'; fi; }
+
+unschedule(){ launchctl bootout "gui/$(id -u)/$AGENT" 2>/dev/null || true
+  if [ -f "$PLIST" ]; then rm -f "$PLIST"; echo "schedule removed"; else echo "no schedule"; fi; }
+
+xml(){ printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+
+schedule(){ local h hours="" claude self prev="" first="" gap="" try
+  for h in "$@"; do
+    if ! [[ "$h" =~ ^[0-9]{1,2}$ ]] || [ $((10#$h)) -gt 23 ]; then die "hours are 0-23, got '$h'"; fi
+    hours+="$((10#$h))"$'\n'
+  done
+  hours=$(printf '%s' "$hours" | sort -n -u | paste -sd, -)
+  claude=$(command -v claude) || die "Claude Code (claude) not found on PATH"
+  self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"   # keep a symlinked path: git pull updates it
+  mkdir -p "$(dirname "$PLIST")"
+  {
+    cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$AGENT</string>
+  <key>ProgramArguments</key>
+  <array><string>$(xml "$self")</string><string>--at</string><string>$hours</string></array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>$(xml "$(dirname "$claude")"):/usr/bin:/bin:/usr/sbin</string></dict>
+  <key>StartCalendarInterval</key>
+  <array>
+EOF
+    for h in ${hours//,/ }; do
+      printf '    <dict><key>Hour</key><integer>%d</integer><key>Minute</key><integer>%d</integer></dict>\n' "$h" "$MINUTE"
+    done
+    cat <<EOF
+  </array>
+  <key>StandardOutPath</key><string>$(xml "$LOG")</string>
+  <key>StandardErrorPath</key><string>$(xml "$LOG")</string>
+</dict>
+</plist>
+EOF
+  } > "$PLIST.tmp"
+  plutil -lint -s "$PLIST.tmp" || { rm -f "$PLIST.tmp"; die "generated an invalid plist"; }
+  mv -f "$PLIST.tmp" "$PLIST"
+  launchctl bootout "gui/$(id -u)/$AGENT" 2>/dev/null || true
+  for try in 1 2 3 4 5; do                                 # bootout finishes asynchronously
+    launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null && break
+    [ "$try" = 5 ] && die "launchctl could not load $PLIST"; sleep 1
+  done
+  echo "pinging every day at $(slots "$hours") (log: $LOG)"
+
+  # pings closer than 5 hours land inside the window the previous one opened
+  for h in ${hours//,/ }; do
+    [ -z "$first" ] && first=$h
+    [ -n "$prev" ] && [ $((h - prev)) -lt 5 ] && gap+=" ${prev}→${h}"
+    prev=$h
+  done
+  [ "$prev" != "$first" ] && [ $((first + 24 - prev)) -lt 5 ] && gap+=" ${prev}→${first}"
+  [ -z "$gap" ] || echo "note: less than 5 hours between${gap}: that ping lands in the window the one before it opened"
+  [ "$first" -lt 8 ] && printf '%s\n' "note: launchd can't wake the Mac. To have it awake for the $(slots "$first") ping:" \
+    "  sudo pmset repeat wakeorpoweron MTWRFSU $(printf '%02d' "$first"):00:00"
+  return 0; }
+
+case "${1:-}" in
+  "") ping ;;
+  --at) on_time "${2:-}" || { log "skipped: ran at $(date +%H:%M), not within ${LATE} min of a scheduled hour (the Mac was probably asleep)"; exit 0; }
+        ping ;;
+  schedule) shift
+    case "${1:-}" in
+      "") show ;;
+      off) unschedule ;;
+      *) schedule "$@" ;;
+    esac ;;
+  -h|--help|help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command '$1' (see cping --help)" ;;
+esac

@@ -1,11 +1,12 @@
 # claude-usage-xbar
 
-See your Claude Code rate limits (the 5-hour and weekly windows) for every claude.ai account you use, right in the macOS menu bar. Switch Claude Code between those accounts with one command, without `/login`.
+See your Claude Code rate limits (the 5-hour and weekly windows) for every claude.ai account you use, right in the macOS menu bar. Switch Claude Code between those accounts with one command, without `/login`. Open the 5-hour window at fixed hours, so the windows line up with your day.
 
-Two scripts:
+Three scripts:
 
 - **`claude-usage.2m.sh`**: an [xbar](https://xbarapp.com) plugin. It shows the active account's 5-hour usage in the menu bar. The dropdown shows every saved account's windows with reset countdowns, plus today's token and cost totals from [ccusage](https://github.com/ryoppippi/ccusage).
 - **`cswitch`**: saves each claude.ai login under a label and swaps between them. Only the login changes. Memory, settings, skills and history in `~/.claude` stay shared.
+- **`cping`**: opens the active login's 5-hour window at hours you choose, with one tiny request through Claude Code.
 
 Unofficial, and not affiliated with Anthropic. Works on macOS only.
 
@@ -80,6 +81,28 @@ You can also switch from the menu with **Switch to &lt;label&gt;**. A notificati
 
 **Restart running Claude Code sessions after a switch.** A session that is still running on the old account can write its refreshed token back to the Keychain. cswitch reports how many sessions are running. If it happens anyway, the menu shows `!`. To fix it, restart the sessions and run `cswitch <label>` again.
 
+## Lining up the 5-hour windows with cping
+
+A 5-hour window opens with your first request after the previous one ran out, not on the clock. If you start work at 8:00, your window runs until 13:00. `cping` opens windows at fixed hours instead:
+
+```sh
+cping schedule 4 9 14 19
+```
+
+This keeps the windows on 4–9, 9–14, 14–19 and 19–24. A morning that starts at 8:00 gets the last hour of the 4–9 window and then a fresh one at 9:00. Pick hours at least 5 hours apart: a ping inside an open window does nothing.
+
+```
+cping                      open a window now
+cping schedule <hour>...   ping every day at these hours
+cping schedule off         remove the schedule
+cping schedule             show the schedule and the last pings
+```
+
+- Each ping is one short Haiku request sent through Claude Code itself (`claude -p` in safe mode, with no tools), so it uses almost none of your limits. Claude Code refreshes its own token as usual.
+- Only the active login is pinged. To ping another account, switch to it first.
+- The pings run a minute past each hour, from a launchd agent. launchd can't wake the Mac. When the Mac was asleep at a ping time, launchd runs the ping on wake, and `cping` skips it if it's more than 15 minutes late, because a late ping would shift the windows instead of lining them up. To have the Mac awake for an early ping, schedule a wake, for example `sudo pmset repeat wakeorpoweron MTWRFSU 04:00:00`.
+- A failed ping shows a notification. Every ping is logged to `~/Library/Logs/cping.log`.
+
 ## How it works
 
 - The windows come from `https://api.anthropic.com/api/oauth/usage`, an undocumented endpoint that may change without notice. The endpoint returns HTTP 429 if it is polled too often, so the plugin calls it at most once every 10 minutes per account. xbar runs the plugin every 2 minutes; in between, it reads the cache in `~/.cache/claude-usage/` and recomputes the countdowns locally. **Force-update windows now** clears that cache.
@@ -94,6 +117,8 @@ What gets stored:
 | Keychain items `Claude Code-credentials (cswitch)` | one saved login per label |
 | `~/.claude-accounts/<label>.oauth.json` | the `oauthAccount` block from `~/.claude.json` (email, organization) |
 | `~/.cache/claude-usage/<label>.cache` | the last rate-limit reading for each account |
+| `~/Library/LaunchAgents/com.github.erjavec.cping.plist` | cping's schedule (only after `cping schedule`) |
+| `~/Library/Logs/cping.log` | when cping pinged, and whether it worked |
 
 ## Troubleshooting
 
@@ -105,6 +130,7 @@ What gets stored:
 | `*` after the percentage | The endpoint is rate-limiting (usually HTTP 429). The last good reading is shown and updates on its own. |
 | "this login is not saved" | Run `cswitch save <label>` for the current login. |
 | "saved token expired; switch to it once" | That account's saved access token has expired. Switch to it once to refresh it. |
+| A "cping" notification: ping failed | The line in `~/Library/Logs/cping.log` has Claude Code's error. Usually the login expired: run `/login` in Claude Code. |
 | "ccusage not installed" when it is | xbar doesn't load your shell profile. Symlink it where xbar can find it: `ln -s "$(command -v ccusage)" ~/.local/bin/ccusage` |
 
 ## Uninstall
@@ -113,7 +139,7 @@ What gets stored:
 ./install.sh --uninstall
 ```
 
-This removes the script and the plugin but keeps your saved logins. The uninstaller prints the commands that delete them too.
+This removes the scripts, the plugin and cping's schedule, but keeps your saved logins. The uninstaller prints the commands that delete them too.
 
 ## Contributing
 
