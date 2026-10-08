@@ -1,0 +1,132 @@
+#!/bin/bash
+# cswitch — switch Claude Code between saved claude.ai accounts without /login.
+# https://github.com/erjavec/claude-usage-xbar
+#
+#   cswitch                 list saved accounts (* = active)
+#   cswitch save <label>    save the current login under <label> (e.g. team, personal)
+#   cswitch <label>         switch to <label> (current login is re-saved first)
+#   cswitch current         print the active label (empty if the login is not saved)
+#
+# Swaps the login: Keychain "Claude Code-credentials" + oauthAccount in ~/.claude.json.
+# Everything else (~/.claude: memory, skills, history, settings) is shared. ~/.claude.json also
+# holds server-side caches (model options, extra-usage state…); most are keyed per org, the rest
+# Claude Code refetches, so they can be stale for a moment after a switch.
+# Saved credentials live in Keychain service "$SAVED_SVC" (account = label);
+# saved oauthAccount blocks in $DIR/<label>.oauth.json. Accounts are told apart by organizationUuid.
+set -euo pipefail
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:$PATH"
+
+LIVE_SVC="${CSWITCH_LIVE_SVC:-Claude Code-credentials}"     # env overrides are for testing
+SAVED_SVC="${CSWITCH_SAVED_SVC:-Claude Code-credentials (cswitch)}"
+CLAUDE_JSON="${CSWITCH_CLAUDE_JSON:-$HOME/.claude.json}"
+DIR="${CSWITCH_DIR:-$HOME/.claude-accounts}"
+XBAR_REFRESH="${CSWITCH_XBAR_REFRESH-xbar://app.xbarapp.com/refreshPlugin?path=claude-usage.2m.sh}"
+PROFILE="https://api.anthropic.com/api/oauth/profile"
+
+# run from the xbar menu there is no terminal: surface messages as notifications too
+notify(){ [ -t 2 ] || osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "cswitch"' \
+  -e 'end run' "$1" >/dev/null 2>&1 || true; }
+say(){ echo "$*" >&2; notify "$*"; }
+die(){ say "cswitch: $*"; exit 1; }
+mkdir -p "$DIR" && chmod 700 "$DIR"
+
+# secrets go through pipes, never argv (ps) or here-strings (bash 3.2 backs those with temp files)
+cj(){ printf '%s' "$1" | jq -r "$2"; }
+live_acct(){ security find-generic-password -s "$LIVE_SVC" 2>/dev/null | sed -n 's/^ *"acct"<blob>="\(.*\)"$/\1/p' || true; }
+live_creds(){ local acct; acct=$(live_acct); [ -n "$acct" ] || return 1; security find-generic-password -s "$LIVE_SVC" -a "$acct" -w 2>/dev/null; }
+kc_read(){ security find-generic-password -s "$1" -a "$2" -w 2>/dev/null; }
+# write via `security -i` stdin; its line limit is ~4k, beyond that the hex has to go through argv
+kc_write(){ local svc=$1 acct=$2 secret=$3 hex
+  hex=$(printf '%s' "$secret" | xxd -p | tr -d '\n')
+  if [ ${#hex} -lt 3800 ]; then
+    printf 'add-generic-password -U -s "%s" -a "%s" -X %s\n' "$svc" "$acct" "$hex" | security -i >/dev/null
+  else
+    security add-generic-password -U -s "$svc" -a "$acct" -X "$hex" >/dev/null
+  fi
+  [ "$(kc_read "$svc" "$acct")" = "$secret" ] || die "Keychain write to '$svc' failed"; }
+
+json_org(){ jq -r '.oauthAccount.organizationUuid // empty' "$CLAUDE_JSON" 2>/dev/null || true; }
+# org the credentials really belong to (authoritative); empty if the access token expired or we're offline
+token_org(){ local at; at=$(cj "$1" '.claudeAiOauth.accessToken // empty'); [ -n "$at" ] || return 0
+  printf 'Authorization: Bearer %s\nanthropic-beta: oauth-2025-04-20\n' "$at" \
+    | curl -s -m 6 -H @- "$PROFILE" 2>/dev/null | jq -r '.organization.uuid // empty' 2>/dev/null || true; }
+label_for_org(){ local f; [ -n "$1" ] || return 0; for f in "$DIR"/*.oauth.json; do [ -e "$f" ] || continue
+  [ "$(jq -r '.organizationUuid // empty' "$f")" = "$1" ] && { basename "$f" .oauth.json; return 0; }; done; return 0; }
+saved_org(){ jq -r '.organizationUuid // empty' "$DIR/$1.oauth.json" 2>/dev/null || true; }
+desc(){ jq -r '.emailAddress + " · " + .organizationName' "$1"; }
+current(){ label_for_org "$(json_org)"; }
+
+# Which saved label do the live credentials belong to? Ask the profile endpoint; when it can't
+# answer, trust ~/.claude.json but only if the plan type matches what that label had before.
+# (A session still running on the old account can write its token back after a switch, so the
+# Keychain and ~/.claude.json may disagree — saving by the json alone would cross the accounts.)
+LIVE=""; LIVE_ORG=""
+resolve_live(){ local old
+  LIVE=$(live_creds) || die "no Claude Code login in Keychain — /login first"
+  [ -n "$(cj "$LIVE" '.claudeAiOauth.refreshToken // empty')" ] || die "live credentials have no refresh token"
+  LIVE_ORG=$(token_org "$LIVE")
+  if [ -n "$LIVE_ORG" ]; then return; fi
+  LIVE_ORG=$(json_org)
+  local l; l=$(label_for_org "$LIVE_ORG"); [ -n "$l" ] || return 0
+  old=$(kc_read "$SAVED_SVC" "$l" || true); [ -n "$old" ] || return 0
+  [ "$(cj "$LIVE" '.claudeAiOauth.subscriptionType // ""')" = "$(cj "$old" '.claudeAiOauth.subscriptionType // ""')" ] \
+    || die "can't verify the Keychain login (token expired/offline) and its plan differs from saved '$l' — not saving; restart Claude Code sessions and retry"; }
+
+save(){ local label=$1 jorg other
+  [[ "$label" =~ ^[a-z0-9_-]+$ ]] || die "label must be [a-z0-9_-]+"
+  resolve_live; jorg=$(json_org)
+  [ -n "$jorg" ] || die "no oauthAccount in $CLAUDE_JSON — /login first"
+  [ "$LIVE_ORG" = "$jorg" ] || die "Keychain login and ~/.claude.json are different accounts (a running session wrote its token back?) — restart Claude Code sessions, then: cswitch <label>"
+  [ -z "$(saved_org "$label")" ] || [ "$(saved_org "$label")" = "$jorg" ] \
+    || die "'$label' is saved for another account ($(desc "$DIR/$label.oauth.json")) — rm $DIR/$label.oauth.json to reuse the label"
+  other=$(label_for_org "$jorg"); [ -z "$other" ] || [ "$other" = "$label" ] || die "this login is already saved as '$other'"
+  kc_write "$SAVED_SVC" "$label" "$LIVE"
+  jq '.oauthAccount' "$CLAUDE_JSON" > "$DIR/$label.oauth.json.tmp" && mv -f "$DIR/$label.oauth.json.tmp" "$DIR/$label.oauth.json"
+  live_acct > "$DIR/.keychain-acct"
+  echo "saved current login as '$label' ($(desc "$DIR/$label.oauth.json"))"; }
+
+set_json_account(){ local tmp; tmp=$(mktemp "$CLAUDE_JSON.cswitch.XXXXXX")
+  jq --slurpfile o "$DIR/$1.oauth.json" '.oauthAccount = $o[0]' "$CLAUDE_JSON" > "$tmp" \
+    || { rm -f "$tmp"; die "could not update $CLAUDE_JSON (Keychain already holds '$1' — rerun: cswitch $1)"; }
+  mv -f "$tmp" "$CLAUDE_JSON"; }
+
+switch(){ local target=$1 from creds acct now rexp n
+  [ -f "$DIR/$target.oauth.json" ] || die "no saved account '$target' (log in to it, then: cswitch save $target)"
+  resolve_live
+  from=$(label_for_org "$LIVE_ORG")
+  [ -n "$from" ] || die "current login ($(jq -r '.oauthAccount.emailAddress // "?"' "$CLAUDE_JSON")) is not saved — run: cswitch save <label>"
+  [ "$LIVE_ORG" = "$(json_org)" ] || say "note: Keychain held '$from' but ~/.claude.json said otherwise (a session wrote its token back) — fixed"
+  kc_write "$SAVED_SVC" "$from" "$LIVE"                     # keep the freshest tokens of the account we leave
+  [ "$LIVE_ORG" = "$(json_org)" ] && jq '.oauthAccount' "$CLAUDE_JSON" > "$DIR/$from.oauth.json.tmp" \
+    && mv -f "$DIR/$from.oauth.json.tmp" "$DIR/$from.oauth.json"
+  if [ "$from" = "$target" ]; then
+    [ "$(json_org)" = "$(saved_org "$target")" ] || set_json_account "$target"
+    echo "already on '$target'"; return 0
+  fi
+  creds=$(kc_read "$SAVED_SVC" "$target") || die "saved credentials for '$target' missing from Keychain"
+  now=$(( $(date +%s) * 1000 )); rexp=$(cj "$creds" '.claudeAiOauth.refreshTokenExpiresAt // 0 | floor')
+  [ "$rexp" -gt 0 ] && [ "$rexp" -lt "$now" ] && \
+    say "warning: '$target' refresh token expired — Claude Code will ask for /login (then: cswitch save $target)"
+  acct=$(live_acct); [ -n "$acct" ] || acct=$(cat "$DIR/.keychain-acct" 2>/dev/null || whoami)
+  kc_write "$LIVE_SVC" "$acct" "$creds"
+  set_json_account "$target"
+  echo "switched: $from -> $target ($(desc "$DIR/$target.oauth.json"))"; notify "switched: $from → $target"
+  n=$(ps -axo comm= | awk '$1=="claude" || $1 ~ /\/claude$/' | wc -l | tr -d ' ')   # pgrep misses the claude binary
+  [ "$n" -gt 0 ] && say "note: $n Claude Code session(s) still on '$from' — restart them (they can write the old token back when it refreshes)"
+  [ -n "$XBAR_REFRESH" ] && open -g "$XBAR_REFRESH" 2>/dev/null || true; }
+
+list(){ local cur f l creds plan; cur=$(current)
+  for f in "$DIR"/*.oauth.json; do [ -e "$f" ] || { echo "no saved accounts — run: cswitch save <label>"; return 0; }
+    l=$(basename "$f" .oauth.json); creds=$(kc_read "$SAVED_SVC" "$l" || echo '{}')
+    plan=$(cj "$creds" '.claudeAiOauth.subscriptionType // "?"')
+    printf '%s %-10s %s · %s\n' "$([ "$l" = "$cur" ] && echo '*' || echo ' ')" "$l" "$(desc "$f")" "$plan"
+  done
+  [ -n "$cur" ] || echo "(active login $(jq -r '.oauthAccount.emailAddress // "?"' "$CLAUDE_JSON") is not saved)"; }
+
+case "${1:-}" in
+  ""|list|status) list ;;
+  current) current ;;
+  save) [ -n "${2:-}" ] || die "usage: cswitch save <label>"; save "$2" ;;
+  -h|--help|help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) switch "$1" ;;
+esac
