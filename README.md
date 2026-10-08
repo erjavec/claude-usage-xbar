@@ -99,6 +99,7 @@ What gets stored:
 
 | You see | Meaning and fix |
 |---|---|
+| A blank item with only xbar's own menu | Blank for about 20 seconds after a refresh is normal, while the first run finishes (`ccusage` is slow). If it stays blank, xbar 2.1.7-beta has stopped showing its plugins, which can happen after several refreshes in a row. Quit and reopen xbar. |
 | `⏣ ⚠︎` in the menu bar | Claude Code has no login in the Keychain. Sign in with Claude Code, then click **Refresh**. |
 | `!` after the percentage | A running session wrote back the old account's token. Restart Claude Code sessions, then run `cswitch <label>`. |
 | `*` after the percentage | The endpoint is rate-limiting (usually HTTP 429). The last good reading is shown and updates on its own. |

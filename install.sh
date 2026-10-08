@@ -18,6 +18,9 @@ PLUGIN=claude-usage.2m.sh
 die(){ echo "install.sh: $*" >&2; exit 1; }
 ok(){ echo "  ✓ $*"; }
 warn(){ echo "  ! $*"; }
+# reload xbar once, and only for its real plugin folder: xbar 2.1.7-beta leaves every plugin blank
+# until it is restarted when it gets several refresh-alls in a row (e.g. from test runs)
+reload_xbar(){ [ -z "${XBAR_PLUGIN_DIR:-}" ] && pgrep -qx xbar && open -g "xbar://app.xbarapp.com/refreshAllPlugins" 2>/dev/null || true; }
 
 # put <src> at <dst> (symlink or copy); back up whatever different file was there before
 place(){ local src=$1 dst=$2 mode=$3 bak
@@ -51,7 +54,7 @@ case "${1:-}" in
     echo "Uninstalling"
     unplace "$REPO/cswitch" "$BIN_DIR/cswitch"
     unplace "$REPO/$PLUGIN" "$PLUGIN_DIR/$PLUGIN"
-    pgrep -qx xbar && open -g "xbar://app.xbarapp.com/refreshAllPlugins" 2>/dev/null || true
+    reload_xbar
     cat <<EOF
 
 Saved logins were kept. To remove them as well:
@@ -87,7 +90,7 @@ chmod +x "$REPO/cswitch" "$REPO/$PLUGIN"
 place "$REPO/cswitch" "$BIN_DIR/cswitch" "$MODE"
 place "$REPO/$PLUGIN" "$PLUGIN_DIR/$PLUGIN" "$MODE"
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) warn "$BIN_DIR is not on your PATH — add it to your shell profile" ;; esac
-pgrep -qx xbar && open -g "xbar://app.xbarapp.com/refreshAllPlugins" 2>/dev/null || true
+reload_xbar
 
 cat <<EOF
 
