@@ -1,6 +1,6 @@
 #!/bin/bash
 # <xbar.title>Claude Usage</xbar.title>
-# <xbar.version>v2.2</xbar.version>
+# <xbar.version>v2.3</xbar.version>
 # <xbar.author>David Erjavec</xbar.author>
 # <xbar.desc>Claude Code 5h + weekly rate-limit windows per saved account (cswitch), throttled+cached, plus today's tokens/cost (ccusage).</xbar.desc>
 # <xbar.dependencies>bash,jq,curl,ccusage,cswitch</xbar.dependencies>
