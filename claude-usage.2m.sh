@@ -11,6 +11,7 @@ export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$HOME/.bun/bin:$H
 export LC_ALL=C  # force dot-decimal so printf/awk parse ccusage's numbers under comma locales
 ENDPOINT="https://api.anthropic.com/api/oauth/usage"
 BETA="oauth-2025-04-20"
+PROFILE="https://api.anthropic.com/api/oauth/profile"
 CACHEDIR="${CU_CACHEDIR:-$HOME/.cache/claude-usage}"   # one <label>.cache per account; CU_* override is for testing
 MAXAGE=600  # only call the usage endpoint at most once per this many seconds per account (avoid HTTP 429)
 ACCTDIR="${CSWITCH_DIR:-$HOME/.claude-accounts}"          # written by cswitch
@@ -32,34 +33,44 @@ cj(){ printf '%s' "$1" | jq -r "$2" 2>/dev/null; }
 token_of(){ cj "$1" '.claudeAiOauth.accessToken // .accessToken // empty'; }
 token_valid(){ local exp; exp=$(cj "$1" '.claudeAiOauth.expiresAt // 0 | floor'); [ "${exp:-0}" -gt $(( $(date +%s)*1000 + 60000 )) ]; }
 
-# ---- which saved account is active (match org uuid against cswitch's saved blocks) ----
-detect_active(){
-  ACTIVE_ORG=$(jq -r '.oauthAccount.organizationUuid // empty' "$HOME/.claude.json" 2>/dev/null)
-  ACTIVE=""; LABELS=()
-  for f in "$ACCTDIR"/*.oauth.json; do [ -e "$f" ] || continue
-    l=$(basename "$f" .oauth.json); LABELS+=("$l")
-    [ -n "$ACTIVE_ORG" ] && [ "$(jq -r '.organizationUuid // empty' "$f")" = "$ACTIVE_ORG" ] && ACTIVE=$l
-  done
+# ---- active token ----
+LIVE_CREDS=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
+TOKEN=$(token_of "$LIVE_CREDS")
+[ -z "$TOKEN" ] && [ -f "$HOME/.claude/.credentials.json" ] && TOKEN=$(token_of "$(cat "$HOME/.claude/.credentials.json")")
 
-  # ---- active token ----
-  LIVE_CREDS=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
-  TOKEN=$(token_of "$LIVE_CREDS")
-  [ -z "$TOKEN" ] && [ -f "$HOME/.claude/.credentials.json" ] && TOKEN=$(token_of "$(cat "$HOME/.claude/.credentials.json")")
-  # a session still running on the old account can write its token back after a switch: then the
-  # Keychain login no longer matches ~/.claude.json (cheap offline check: plan type vs the saved login)
-  MISMATCH=""
-  if [ -n "$ACTIVE" ]; then
-    ASUB=$(cj "$(security find-generic-password -s "$SAVED_SVC" -a "$ACTIVE" -w 2>/dev/null)" '.claudeAiOauth.subscriptionType // empty')
-    LSUB=$(cj "$LIVE_CREDS" '.claudeAiOauth.subscriptionType // empty')
-    [ -n "$ASUB" ] && [ -n "$LSUB" ] && [ "$ASUB" != "$LSUB" ] && MISMATCH="$LSUB"
-  fi
-  return 0
-}
-detect_active
-# cswitch writes the Keychain, then ~/.claude.json: a run that lands between the two sees a mismatch
-# that is gone a moment later, so look again before warning
-if [ -n "$MISMATCH" ]; then sleep 3; detect_active; fi
+# ---- which saved account is active: the one the CLI (Keychain login) is on ----
+# ~/.claude.json is not that: the Claude desktop app writes its own login into it. So ask the profile
+# endpoint which org the Keychain token belongs to (cached per token, one call per token refresh).
+live_org(){ local fp cf="$CACHEDIR/live-org" org=""
+  [ -n "$TOKEN" ] || return 0
+  fp=$(printf '%s' "$TOKEN" | shasum | cut -c1-12)
+  if [ -f "$cf" ] && [ "$(cut -d' ' -f1 "$cf")" = "$fp" ]; then cut -d' ' -f2 "$cf"; return 0; fi
+  org=$(printf 'Authorization: Bearer %s\nanthropic-beta: %s\n' "$TOKEN" "$BETA" \
+    | curl -s -m 6 -H @- "$PROFILE" 2>/dev/null | jq -r '.organization.uuid // empty' 2>/dev/null)
+  if [ -n "$org" ]; then mkdir -p "$CACHEDIR" 2>/dev/null && chmod 700 "$CACHEDIR" 2>/dev/null
+    printf '%s %s\n' "$fp" "$org" > "$cf"; fi
+  printf '%s' "$org"; }
+JSON_ORG=$(jq -r '.oauthAccount.organizationUuid // empty' "$HOME/.claude.json" 2>/dev/null)
+LIVE_ORG=$(live_org)
+ACTIVE_ORG=${LIVE_ORG:-$JSON_ORG}   # offline or token expired: fall back to ~/.claude.json (checked below)
+ACTIVE=""; JSON_LABEL=""; LABELS=()
+for f in "$ACCTDIR"/*.oauth.json; do [ -e "$f" ] || continue
+  l=$(basename "$f" .oauth.json); LABELS+=("$l")
+  o=$(jq -r '.organizationUuid // empty' "$f")
+  [ -n "$ACTIVE_ORG" ] && [ "$o" = "$ACTIVE_ORG" ] && ACTIVE=$l
+  [ -n "$JSON_ORG" ] && [ "$o" = "$JSON_ORG" ] && JSON_LABEL=$l
+done
 ALABEL=${ACTIVE:-live}
+# the desktop app (or a session) is on another account than the CLI: worth a note, not an alarm
+DESKTOP=""; [ -n "$LIVE_ORG" ] && [ -n "$JSON_ORG" ] && [ "$LIVE_ORG" != "$JSON_ORG" ] && DESKTOP=${JSON_LABEL:-another account}
+# fallback only: a session still running on the old account can write its token back after a switch, so
+# without the profile answer the Keychain login may not match ~/.claude.json (plan type vs the saved login)
+MISMATCH=""
+if [ -z "$LIVE_ORG" ] && [ -n "$ACTIVE" ]; then
+  ASUB=$(cj "$(security find-generic-password -s "$SAVED_SVC" -a "$ACTIVE" -w 2>/dev/null)" '.claudeAiOauth.subscriptionType // empty')
+  LSUB=$(cj "$LIVE_CREDS" '.claudeAiOauth.subscriptionType // empty')
+  [ -n "$ASUB" ] && [ -n "$LSUB" ] && [ "$ASUB" != "$LSUB" ] && MISMATCH="$LSUB"
+fi
 
 # ---- quota windows for one account: throttled endpoint call + last-good cache ----
 # fetch <label> <token|empty>  -> sets F FR S SR OP OR CACHED_AT SRC HTTP
@@ -179,7 +190,8 @@ echo "Rate-limit windows | size=11 color=#888888"
 printf '%s\n' "$ACTIVE_OUT"
 [ -n "$OTHER_OUT" ] && printf '%s' "$OTHER_OUT"
 [ -z "$ACTIVE" ] && echo "this login is not saved — run: cswitch save <label> | size=11 color=orange"
-[ -n "$MISMATCH" ] && echo "⚠ Keychain holds a $MISMATCH login, not '$ACTIVE' — the Claude desktop app is logged in as '$ACTIVE', or a session wrote its token back; switch the app, or restart sessions and run: cswitch $ACTIVE | size=11 color=red"
+[ -n "$MISMATCH" ] && echo "⚠ Keychain holds a $MISMATCH login, not '$ACTIVE' — a session wrote its token back; restart sessions, run: cswitch $ACTIVE | size=11 color=red"
+[ -n "$DESKTOP" ] && echo "Claude desktop app is on $DESKTOP, not the CLI | size=11 color=#888888"
 
 echo "---"
 # ---- cost section ----
