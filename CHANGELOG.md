@@ -3,6 +3,7 @@
 ## Unreleased
 
 - The plugin no longer flashes the "Keychain holds a … login" warning (or briefly shows the wrong account as active) when a refresh lands in the middle of a `cswitch` switch. It now looks again after 3 seconds and warns only if the mismatch is still there.
+- The mismatch warning now also names the Claude desktop app as a possible cause. Its login is written to `~/.claude.json`, so having the app on a different account than the CLI triggers the warning.
 
 ## 2.3.0 — 2026-10-08
 

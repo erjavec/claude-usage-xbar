@@ -179,7 +179,7 @@ echo "Rate-limit windows | size=11 color=#888888"
 printf '%s\n' "$ACTIVE_OUT"
 [ -n "$OTHER_OUT" ] && printf '%s' "$OTHER_OUT"
 [ -z "$ACTIVE" ] && echo "this login is not saved — run: cswitch save <label> | size=11 color=orange"
-[ -n "$MISMATCH" ] && echo "⚠ Keychain holds a $MISMATCH login, not '$ACTIVE' — a session wrote its token back; restart sessions, run: cswitch $ACTIVE | size=11 color=red"
+[ -n "$MISMATCH" ] && echo "⚠ Keychain holds a $MISMATCH login, not '$ACTIVE' — the Claude desktop app is logged in as '$ACTIVE', or a session wrote its token back; switch the app, or restart sessions and run: cswitch $ACTIVE | size=11 color=red"
 
 echo "---"
 # ---- cost section ----
