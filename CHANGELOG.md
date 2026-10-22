@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The plugin no longer flashes the "Keychain holds a … login" warning (or briefly shows the wrong account as active) when a refresh lands in the middle of a `cswitch` switch. It now looks again after 3 seconds and warns only if the mismatch is still there.
+
 ## 2.3.0 — 2026-10-08
 
 - Added `cping`, which opens the active login's 5-hour window at fixed hours (`cping schedule 4 9 14 19`) so the windows line up with your day. It sends one tiny Haiku request through Claude Code from a launchd agent, and skips a ping that runs late because the Mac was asleep. `install.sh` installs it, and `--uninstall` also removes its schedule.

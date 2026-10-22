@@ -33,26 +33,33 @@ token_of(){ cj "$1" '.claudeAiOauth.accessToken // .accessToken // empty'; }
 token_valid(){ local exp; exp=$(cj "$1" '.claudeAiOauth.expiresAt // 0 | floor'); [ "${exp:-0}" -gt $(( $(date +%s)*1000 + 60000 )) ]; }
 
 # ---- which saved account is active (match org uuid against cswitch's saved blocks) ----
-ACTIVE_ORG=$(jq -r '.oauthAccount.organizationUuid // empty' "$HOME/.claude.json" 2>/dev/null)
-ACTIVE=""; LABELS=()
-for f in "$ACCTDIR"/*.oauth.json; do [ -e "$f" ] || continue
-  l=$(basename "$f" .oauth.json); LABELS+=("$l")
-  [ -n "$ACTIVE_ORG" ] && [ "$(jq -r '.organizationUuid // empty' "$f")" = "$ACTIVE_ORG" ] && ACTIVE=$l
-done
-ALABEL=${ACTIVE:-live}
+detect_active(){
+  ACTIVE_ORG=$(jq -r '.oauthAccount.organizationUuid // empty' "$HOME/.claude.json" 2>/dev/null)
+  ACTIVE=""; LABELS=()
+  for f in "$ACCTDIR"/*.oauth.json; do [ -e "$f" ] || continue
+    l=$(basename "$f" .oauth.json); LABELS+=("$l")
+    [ -n "$ACTIVE_ORG" ] && [ "$(jq -r '.organizationUuid // empty' "$f")" = "$ACTIVE_ORG" ] && ACTIVE=$l
+  done
 
-# ---- active token ----
-LIVE_CREDS=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
-TOKEN=$(token_of "$LIVE_CREDS")
-[ -z "$TOKEN" ] && [ -f "$HOME/.claude/.credentials.json" ] && TOKEN=$(token_of "$(cat "$HOME/.claude/.credentials.json")")
-# a session still running on the old account can write its token back after a switch: then the
-# Keychain login no longer matches ~/.claude.json (cheap offline check: plan type vs the saved login)
-MISMATCH=""
-if [ -n "$ACTIVE" ]; then
-  ASUB=$(cj "$(security find-generic-password -s "$SAVED_SVC" -a "$ACTIVE" -w 2>/dev/null)" '.claudeAiOauth.subscriptionType // empty')
-  LSUB=$(cj "$LIVE_CREDS" '.claudeAiOauth.subscriptionType // empty')
-  [ -n "$ASUB" ] && [ -n "$LSUB" ] && [ "$ASUB" != "$LSUB" ] && MISMATCH="$LSUB"
-fi
+  # ---- active token ----
+  LIVE_CREDS=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
+  TOKEN=$(token_of "$LIVE_CREDS")
+  [ -z "$TOKEN" ] && [ -f "$HOME/.claude/.credentials.json" ] && TOKEN=$(token_of "$(cat "$HOME/.claude/.credentials.json")")
+  # a session still running on the old account can write its token back after a switch: then the
+  # Keychain login no longer matches ~/.claude.json (cheap offline check: plan type vs the saved login)
+  MISMATCH=""
+  if [ -n "$ACTIVE" ]; then
+    ASUB=$(cj "$(security find-generic-password -s "$SAVED_SVC" -a "$ACTIVE" -w 2>/dev/null)" '.claudeAiOauth.subscriptionType // empty')
+    LSUB=$(cj "$LIVE_CREDS" '.claudeAiOauth.subscriptionType // empty')
+    [ -n "$ASUB" ] && [ -n "$LSUB" ] && [ "$ASUB" != "$LSUB" ] && MISMATCH="$LSUB"
+  fi
+  return 0
+}
+detect_active
+# cswitch writes the Keychain, then ~/.claude.json: a run that lands between the two sees a mismatch
+# that is gone a moment later, so look again before warning
+if [ -n "$MISMATCH" ]; then sleep 3; detect_active; fi
+ALABEL=${ACTIVE:-live}
 
 # ---- quota windows for one account: throttled endpoint call + last-good cache ----
 # fetch <label> <token|empty>  -> sets F FR S SR OP OR CACHED_AT SRC HTTP
