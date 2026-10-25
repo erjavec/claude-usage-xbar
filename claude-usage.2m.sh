@@ -119,6 +119,23 @@ window(){ local name=$1 pct=$2 at=$3
     echo "resets in $(countdown "$at") | size=11 color=#888888"
   fi; }
 
+# ---- snapshot.json for other tools: labels, percentages and times only (no emails, orgs or tokens) ----
+# snap_add <label>: append the account fetch() just read
+SNAP=""
+snap_add(){ local ra=""
+  [ "${CACHED_AT:-0}" -gt 0 ] && ra=$(date -u -r "$CACHED_AT" +%Y-%m-%dT%H:%M:%SZ)
+  SNAP+=$(jq -nc --arg l "$1" --arg ra "$ra" --arg src "$SRC" --arg f "$F" --arg fr "$FR" --arg s "$S" --arg sr "$SR" '
+    def n: if . == "" then null else . end;
+    {label:$l, read_at:($ra|n), source:$src,
+     five_hour:{pct:($f|n|if .==null then null else tonumber end), resets_at:($fr|n)},
+     seven_day:{pct:($s|n|if .==null then null else tonumber end), resets_at:($sr|n)}}')$'\n'; }
+# written to a temp file, then moved into place, so readers never see half a file
+write_snapshot(){ local tmp="$CACHEDIR/snapshot.json.$$"
+  mkdir -p "$CACHEDIR" 2>/dev/null && chmod 700 "$CACHEDIR" 2>/dev/null
+  if printf '%s' "$SNAP" | jq -s --arg a "$ACTIVE" --arg g "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+       '{version:1, generated_at:$g, active:(if $a == "" then null else $a end), accounts:.}' > "$tmp" 2>/dev/null \
+     && chmod 600 "$tmp" && mv -f "$tmp" "$CACHEDIR/snapshot.json"; then :; else rm -f "$tmp"; fi; }
+
 render(){ local label=$1 is_active=$2 head email org
   email=$(jq -r '.emailAddress // empty' "$ACCTDIR/$label.oauth.json" 2>/dev/null)
   org=$(jq -r '.organizationName // empty' "$ACCTDIR/$label.oauth.json" 2>/dev/null)
@@ -152,6 +169,7 @@ render(){ local label=$1 is_active=$2 head email org
 
 # active account first
 fetch "$ALABEL" "$TOKEN"
+[ -n "$ACTIVE" ] && snap_add "$ACTIVE"   # an unsaved login has no label: the snapshot says active: null
 AF=$F; ASRC=$SRC; ACTIVE_OUT=$(render "$ALABEL" 1)
 
 # inactive saved accounts: live while their saved access token is still valid, else last known
@@ -161,8 +179,10 @@ for l in "${LABELS[@]}"; do
   creds=$(security find-generic-password -s "$SAVED_SVC" -a "$l" -w 2>/dev/null)
   tok=""; token_valid "$creds" && tok=$(token_of "$creds")
   fetch "$l" "$tok"
+  snap_add "$l"
   OTHER_OUT+=$'---\n'"$(render "$l" 0)"$'\n'
 done
+write_snapshot
 
 # ---- tokens / cost (ccusage; local, cheap, refreshes every run; all accounts combined) ----
 TODAY=$(date +%F)

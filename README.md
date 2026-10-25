@@ -94,6 +94,7 @@ What gets stored:
 | Keychain items `Claude Code-credentials (cswitch)` | one saved login per label |
 | `~/.claude-accounts/<label>.oauth.json` | the `oauthAccount` block from `~/.claude.json` (email, organization) |
 | `~/.cache/claude-usage/<label>.cache` | the last rate-limit reading for each account |
+| `~/.cache/claude-usage/snapshot.json` | the active label and each account's latest windows (percentages, reset times, when read) as JSON for other tools; no emails, org names or tokens |
 
 ## Troubleshooting
 
