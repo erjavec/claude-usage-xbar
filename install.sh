@@ -1,11 +1,11 @@
 #!/bin/bash
-# install.sh — install cswitch, cping and the Claude Usage xbar plugin from this checkout.
+# install.sh — install cswitch and the Claude Usage xbar plugin from this checkout.
 #
 #   ./install.sh               symlink them into place (a later `git pull` updates them)
 #   ./install.sh --copy        copy instead of symlinking (the checkout can be deleted afterwards)
-#   ./install.sh --uninstall   remove them again, and cping's schedule (saved logins are kept)
+#   ./install.sh --uninstall   remove them again (saved logins are kept)
 #
-# cswitch and cping go to ~/.local/bin, the plugin to xbar's plugin folder. Existing files that
+# cswitch goes to ~/.local/bin, the plugin to xbar's plugin folder. Existing files that
 # differ are moved to ~/.cache/claude-usage-xbar/backup first (not next to the plugin: xbar would
 # run them).
 set -euo pipefail
@@ -45,6 +45,17 @@ unplace(){ local src=$1 dst=$2
   elif [ -e "$dst" ]; then warn "left $dst alone (not installed from this checkout or modified)"
   fi; }
 
+# cping was removed after 2.3.0: drop its launchd schedule and our link to it
+retire_cping(){ local agent=com.github.erjavec.cping plist="$HOME/Library/LaunchAgents/com.github.erjavec.cping.plist"
+  if [ -f "$plist" ]; then
+    launchctl bootout "gui/$(id -u)/$agent" 2>/dev/null || true
+    rm -f "$plist"; ok "removed cping's schedule"
+  fi
+  if [ -L "$BIN_DIR/cping" ] && [ "$(readlink "$BIN_DIR/cping")" = "$REPO/cping" ]; then
+    rm -f "$BIN_DIR/cping"; ok "removed $BIN_DIR/cping (cping is gone)"
+  elif [ -e "$BIN_DIR/cping" ]; then warn "cping is gone from this repo: delete $BIN_DIR/cping yourself"
+  fi; }
+
 [ "$(uname -s)" = Darwin ] || die "macOS only (logins are stored in the macOS Keychain)"
 
 MODE="link"
@@ -53,9 +64,8 @@ case "${1:-}" in
   --copy) MODE=copy ;;
   --uninstall)
     echo "Uninstalling"
-    [ -f "$HOME/Library/LaunchAgents/com.github.erjavec.cping.plist" ] && "$REPO/cping" schedule off | sed 's/^/  ✓ cping: /'
     unplace "$REPO/cswitch" "$BIN_DIR/cswitch"
-    unplace "$REPO/cping" "$BIN_DIR/cping"
+    retire_cping
     unplace "$REPO/$PLUGIN" "$PLUGIN_DIR/$PLUGIN"
     reload_xbar
     cat <<EOF
@@ -64,7 +74,7 @@ Saved logins were kept. To remove them as well:
   for l in \$(ls ~/.claude-accounts | sed -n 's/\.oauth\.json\$//p'); do
     security delete-generic-password -s "Claude Code-credentials (cswitch)" -a "\$l"
   done
-  rm -rf ~/.claude-accounts ~/.cache/claude-usage ~/Library/Logs/cping.log
+  rm -rf ~/.claude-accounts ~/.cache/claude-usage
 EOF
     exit 0 ;;
   -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -89,10 +99,10 @@ command -v claude >/dev/null || warn "claude (Claude Code) not found on PATH"
 
 echo "Installing ($MODE)"
 mkdir -p "$BIN_DIR" "$PLUGIN_DIR"
-chmod +x "$REPO/cswitch" "$REPO/cping" "$REPO/$PLUGIN"
+chmod +x "$REPO/cswitch" "$REPO/$PLUGIN"
 place "$REPO/cswitch" "$BIN_DIR/cswitch" "$MODE"
-place "$REPO/cping" "$BIN_DIR/cping" "$MODE"
 place "$REPO/$PLUGIN" "$PLUGIN_DIR/$PLUGIN" "$MODE"
+retire_cping
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) warn "$BIN_DIR is not on your PATH — add it to your shell profile" ;; esac
 reload_xbar
 
@@ -103,7 +113,4 @@ Done. Next, save each claude.ai account you use with Claude Code:
   2. /login to the next account, then:                               cswitch save personal
   3. Switch any time with:  cswitch work   (or from the xbar menu)
 Labels are free-form: lowercase letters, digits, - and _.
-
-Optional: line the 5-hour windows up with your day by opening one at fixed hours:
-  cping schedule 4 9 14 19
 EOF
